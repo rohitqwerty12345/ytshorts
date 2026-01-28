@@ -1,0 +1,6 @@
+playwright
+yt-dlp
+static-ffmpeg
+moviepy
+google-auth-oauthlib
+google-api-python-client
