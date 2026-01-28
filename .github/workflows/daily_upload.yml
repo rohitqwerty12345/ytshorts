@@ -2,24 +2,30 @@ name: Twice Daily YouTube Upload
 
 on:
   schedule:
-    - cron: '0 2,14 * * *' # Runs every 12 hours (UTC time)
-  workflow_dispatch: # This adds a "Run Now" button for testing
+    # Runs at 02:00 and 14:00 UTC (Adjust these numbers for your local time)
+    - cron: '0 2,14 * * *' 
+  workflow_dispatch: # This adds a manual "Run Now" button in GitHub Actions
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          python -m playwright install chromium
+
       - name: Run Bot
         env:
+          # These connect your GitHub Secrets to the Python script
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
           YOUTUBE_CLIENT_SECRETS: ${{ secrets.YOUTUBE_CLIENT_SECRETS }}
           YOUTUBE_TOKEN_PICKLE: ${{ secrets.YOUTUBE_TOKEN_PICKLE }}
         run: python run_bot.py
