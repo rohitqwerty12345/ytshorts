@@ -5,18 +5,16 @@ import random
 import yt_dlp
 import static_ffmpeg
 from moviepy import VideoFileClip, concatenate_videoclips
-from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
 # ==========================================
-# ROTATIONAL KEYWORDS & SETTINGS
+# SETTINGS
 # ==========================================
 KEYWORDS = [
     "luxury travel shorts", "budget travel hacks", "hidden gems europe",
     "solo travel adventure", "travel photography tips", "bali island life",
-    "tokyo street food", "tropical paradise vlog", "mountain hiking aesthetic",
-    "safari wildlife moments"
+    "tokyo street food", "tropical paradise vlog"
 ]
 MY_KEYWORD = random.choice(KEYWORDS)
 MY_CHANNEL_NAME = "VoyageSpotlight"
@@ -24,103 +22,118 @@ OUTRO_PATH = "outro.mp4"
 # ==========================================
 
 def get_youtube_clients():
-    """Initializes both the Search (API Key) and Upload (OAuth) clients"""
-    # 1. Retrieve secrets from GitHub environment
+    """Initializes API clients and prepares environment."""
     api_key = os.environ.get('YOUTUBE_API_KEY')
     client_secrets_json = os.environ.get('YOUTUBE_CLIENT_SECRETS')
     token_b64 = os.environ.get('YOUTUBE_TOKEN_PICKLE')
     
-    # Reconstruct local files for the libraries to read
+    # Write temporary credential files
     with open('client_secrets.json', 'w') as f: f.write(client_secrets_json)
     with open('token.pickle', 'wb') as f: f.write(base64.b64decode(token_b64))
     
-    # Build the Search Client (uses API Key)
+    # Write cookies if available
+    cookie_data = os.environ.get('YOUTUBE_COOKIES')
+    if cookie_data:
+        with open('cookies.txt', 'w') as f: f.write(cookie_data)
+
     search_client = build("youtube", "v3", developerKey=api_key)
-    
-    # Build the Upload Client (uses OAuth Token)
     with open('token.pickle', 'rb') as f: creds = pickle.load(f)
     upload_client = build("youtube", "v3", credentials=creds)
     
     return search_client, upload_client
 
-def find_video_id(search_client, keyword):
-    """Uses the official Search API to find a Short under 60s"""
-    print(f"[API] Searching for: {keyword}")
-    request = search_client.search().list(
-        q=keyword,
-        part="snippet",
-        maxResults=10,
-        type="video",
-        videoDuration="short" # API limit for 'short' is < 4 mins
-    )
-    response = request.execute()
+def download_with_fallback(url, output_name):
+    """Tries downloading with browser spoofing first, then falls back to cookies."""
+    opts = {
+        'quiet': True,
+        'outtmpl': output_name,
+        'format': 'bestvideo[height<=1080]+bestaudio/best[ext=m4a]/best',
+        'merge_output_format': 'mp4',
+        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    }
 
-    for item in response.get("items", []):
-        v_id = item["id"]["videoId"]
-        url = f"https://www.youtube.com/watch?v={v_id}"
-        
-        # Exact duration check with yt-dlp
-        with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
-            try:
-                info = ydl.extract_info(url, download=False)
-                if 0 < info.get('duration', 0) <= 60:
-                    print(f"[MATCH] Valid Short found: {url}")
-                    return url
-            except: continue
-    return None
+    # Try 1: Clean Download
+    try:
+        print("[DOWNLOAD] Attempting download without cookies...")
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl.download([url])
+            return True
+    except:
+        print("[DOWNLOAD] Blocked. Retrying with YOUTUBE_COOKIES...")
+
+    # Try 2: Cookie Download
+    if os.path.exists('cookies.txt'):
+        opts['cookiefile'] = 'cookies.txt'
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.download([url])
+                return True
+        except Exception as e:
+            print(f"[ERROR] All download attempts failed: {e}")
+    return False
 
 def main():
-    print(f"--- STARTING API-DRIVEN AUTO BOT ---")
-    print(f"Target Keyword: {MY_KEYWORD}")
+    print(f"--- STARTING SMART AUTO-BOT (Keyword: {MY_KEYWORD}) ---")
     static_ffmpeg.add_paths()
-    
     search_client, upload_client = get_youtube_clients()
 
-    # 1. Search for a video ID
-    target_url = find_video_id(search_client, MY_KEYWORD)
+    # 1. Search via API
+    request = search_client.search().list(q=MY_KEYWORD, part="snippet", maxResults=10, type="video", videoDuration="short")
+    results = request.execute()
+    
+    target_url = None
+    video_info = None
+
+    for item in results.get("items", []):
+        v_id = item["id"]["videoId"]
+        temp_url = f"https://www.youtube.com/watch?v={v_id}"
+        
+        # Verify duration
+        with yt_dlp.YoutubeDL({'quiet': True, 'cookiefile': 'cookies.txt' if os.path.exists('cookies.txt') else None}) as ydl:
+            try:
+                info = ydl.extract_info(temp_url, download=False)
+                if 0 < info.get('duration', 0) <= 60:
+                    target_url = temp_url
+                    video_info = info
+                    break
+            except: continue
+
     if not target_url:
-        print("[ERROR] No suitable videos found for this keyword.")
+        print("[ERROR] No valid videos found. Cookies may be expired.")
         return
 
-    # 2. Download high quality
-    ydl_opts = {'quiet': True, 'format': 'bestvideo+bestaudio/best', 'outtmpl': 'raw_download.%(ext)s'}
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(target_url, download=True)
-        raw_file = ydl.prepare_filename(info)
-        creator = info.get('uploader', 'Creator')
+    # 2. Download
+    if not download_with_fallback(target_url, "raw.mp4"):
+        return
 
-    # 3. Generate Title (100 char limit)
+    # 3. Process Video
+    print("[EDITING] Stitching outro...")
+    creator = video_info.get('uploader', 'Creator')
+    clip = VideoFileClip("raw.mp4")
+    outro = VideoFileClip(OUTRO_PATH).resized(height=clip.h).with_fps(clip.fps)
+    
+    final = concatenate_videoclips([clip, outro])
+    final.write_videofile("READY.mp4", codec="libx264", audio_codec="aac")
+
+    # 4. Final Upload
     prefix = f"Org by [@{creator}] | "
     suffix = f" | {MY_CHANNEL_NAME}"
-    clean_title = info.get('title', 'Travel Highlight')
-    title_text = f"{prefix}{clean_title[:(100-len(prefix)-len(suffix))]}{suffix}"
-
-    # 4. Stitch with MoviePy 2.0
-    print("[EDITING] Stitching outro...")
-    clip = VideoFileClip(raw_file)
-    outro = VideoFileClip(OUTRO_PATH).resized(height=clip.h).with_fps(clip.fps)
-    final = concatenate_videoclips([clip, outro])
-    final_path = "FINAL_UPLOAD.mp4"
-    final.write_videofile(final_path, codec="libx264", audio_codec="aac")
-
-    # 5. Official Upload
-    print(f"[UPLOAD] Posting to YouTube: {title_text}")
-    request_body = {
-        'snippet': {
-            'title': title_text,
-            'description': f"Support the creator: {creator}! Promoting amazing travel talent.",
-            'tags': ['shorts', 'travel'],
-            'categoryId': '22'
-        },
+    title = f"{prefix}{video_info.get('title', '')[:(100-len(prefix)-len(suffix))]}{suffix}"
+    
+    print(f"[UPLOAD] Posting: {title}")
+    body = {
+        'snippet': {'title': title, 'description': f"Original content by {creator}.", 'categoryId': '22'},
         'status': {'privacyStatus': 'public', 'selfDeclaredMadeForKids': False}
     }
-    media = MediaFileUpload(final_path, chunksize=-1, resumable=True)
-    upload_client.videos().insert(part="snippet,status", body=request_body, media_body=media).execute()
+    media = MediaFileUpload("READY.mp4", chunksize=-1, resumable=True)
+    upload_client.videos().insert(part="snippet,status", body=body, media_body=media).execute()
     
-    # Cleanup
+    # 5. Cleanup
     clip.close()
     outro.close()
-    print("[SUCCESS] Process Complete!")
+    for f in ["raw.mp4", "READY.mp4", "cookies.txt", "token.pickle", "client_secrets.json"]:
+        if os.path.exists(f): os.remove(f)
+    print("[SUCCESS] Bot finished task.")
 
 if __name__ == "__main__":
     main()
